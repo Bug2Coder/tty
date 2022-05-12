@@ -2,7 +2,8 @@ package tty
 
 import (
 	"errors"
-	ptyDevice "github.com/elisescu/pty"
+	"fmt"
+	ptyDevice "github.com/creack/pty"
 	"golang.org/x/crypto/ssh/terminal"
 	"io"
 	"os"
@@ -20,15 +21,15 @@ type PTYHandler interface {
 }
 
 type ptyManager struct {
-	fd                int             // 文件描述符
-	w                 io.WriteCloser  // 远程写入
-	ptyFile           *os.File        // 文件
-	command           *exec.Cmd       // 命令
-	terminalInitState *terminal.State // 终端初始状态
+	fd                int                // 文件描述符
+	rw                io.ReadWriteCloser // 远程写入
+	ptyFile           *os.File           // 文件
+	command           *exec.Cmd          // 命令
+	terminalInitState *terminal.State    // 终端初始状态
 }
 
 // NewPTY 创建pty会话
-func NewPTY(w io.WriteCloser) (*ptyManager, error) {
+func NewPTY(w io.ReadWriteCloser) (*ptyManager, error) {
 	if w == nil {
 		return nil, errors.New("writer is nil")
 	}
@@ -42,7 +43,7 @@ func NewPTY(w io.WriteCloser) (*ptyManager, error) {
 	if err != nil {
 		return nil, err
 	}
-	ptyMaster.w = w
+	ptyMaster.rw = w
 	return ptyMaster, nil
 }
 
@@ -59,22 +60,35 @@ func (pty *ptyManager) StopPtyAndRestore() {
 
 // Run 启动pty服务
 func (pty *ptyManager) Run() {
-	if pty.w == nil {
+	var err error
+	if pty.rw == nil {
 		return
 	}
+	pty.MakeRaw()
 	defer pty.StopPtyAndRestore()
-	err := pty.MakeRaw()
-	if err != nil {
-		return
-	}
 	go func() {
-		_, err := io.Copy(pty.w, pty)
+		_, err := io.Copy(pty.rw, pty)
 		if err != nil {
 			pty.StopPtyAndRestore()
 			// 关闭远程链接
-			pty.w.Close()
+			err = pty.rw.Close()
+			if err != nil {
+				return
+			}
 		}
 	}()
+	go func() {
+		_, err := io.Copy(pty, pty.rw)
+		if err != nil {
+			pty.StopPtyAndRestore()
+			// 关闭远程链接
+			err = pty.rw.Close()
+			if err != nil {
+				return
+			}
+		}
+	}()
+
 	// 等待pty结束
 	err = pty.Wait()
 	if err != nil {
@@ -99,14 +113,8 @@ func (pty *ptyManager) initEnv(command string, envVars []string) error {
 	pty.command.Env = envVars
 	pty.ptyFile, err = ptyDevice.Start(pty.command)
 	if err != nil {
-		return err
+		return errors.New(fmt.Sprintf("startError:%s", err))
 	}
-	cols, rows, err := terminal.GetSize(0)
-	if err != nil {
-		return err
-	}
-	// 给定一个初始大小
-	pty.SetWinSize(rows, cols)
 	pty.fd = int(pty.ptyFile.Fd())
 	return nil
 }
@@ -128,8 +136,9 @@ func (pty *ptyManager) Read(b []byte) (int, error) {
 }
 
 // SetWinSize 设置终端窗口大小
-func (pty *ptyManager) SetWinSize(rows, cols int) {
-	ptyDevice.Setsize(pty.ptyFile, rows, cols)
+func (pty *ptyManager) SetWinSize(rows, cols int) error {
+	err := ptyDevice.Setsize(pty.ptyFile, &ptyDevice.Winsize{Rows: uint16(rows), Cols: uint16(cols)})
+	return err
 }
 
 // Wait 等待结束

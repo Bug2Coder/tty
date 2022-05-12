@@ -48,21 +48,7 @@ func (session *ttySession) Write(data []byte) (int, error) {
 // HandleConnection 读取消息并进行处理
 func (session *ttySession) HandleConnection() {
 	// 开启pty
-	go session.ptyHandler.Run()
-	// 等待远程消息，然后写入本地pty
-	for {
-		err := session.ReadAndHandle(
-			func(data []byte) {
-				_, err := session.ptyHandler.Write(data)
-				if err != nil {
-					return
-				}
-			},
-		)
-		if err != nil {
-			break
-		}
-	}
+	session.ptyHandler.Run()
 	session.lock.Lock()
 	session.rw = nil
 	session.lock.Unlock()
